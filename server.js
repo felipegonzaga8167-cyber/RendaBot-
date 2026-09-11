@@ -3,22 +3,31 @@ const http = require("http");
 const PORT = process.env.PORT || 10000;
 
 async function getHotmartToken() {
+  const clientId = process.env.HOTMART_CLIENT_ID;
+  const clientSecret = process.env.HOTMART_CLIENT_SECRET;
   const basic = process.env.HOTMART_BASIC;
 
-  if (!basic) {
-    throw new Error("HOTMART_BASIC não configurado");
+  if (!clientId || !clientSecret || !basic) {
+    throw new Error("Credenciais Hotmart não configuradas no Render");
   }
 
-  const response = await fetch(
-    "https://api-sec-vlc.hotmart.com/security/oauth/token?grant_type=client_credentials",
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Basic ${basic}`,
-        "Content-Type": "application/json"
-      }
+  const url =
+    "https://api-sec-vlc.hotmart.com/security/oauth/token" +
+    "?grant_type=client_credentials" +
+    `&client_id=${encodeURIComponent(clientId)}` +
+    `&client_secret=${encodeURIComponent(clientSecret)}`;
+
+  const authorization = basic.startsWith("Basic ")
+    ? basic
+    : `Basic ${basic}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": authorization,
+      "Content-Type": "application/json"
     }
-  );
+  });
 
   const data = await response.json();
 
