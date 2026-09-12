@@ -51,6 +51,40 @@ const server = http.createServer(async (req, res) => {
     }));
     return;
   }
+if (req.url === "/api/products") {
+  try {
+    const token = await getHotmartToken();
+
+    const response = await fetch(
+      "https://developers.hotmart.com/products/api/v1/products?max_results=50",
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        `Erro Hotmart ${response.status}: ${JSON.stringify(data)}`
+      );
+    }
+
+    res.end(JSON.stringify(data));
+  } catch (error) {
+    res.statusCode = 500;
+
+    res.end(JSON.stringify({
+      status: "erro",
+      mensagem: error.message
+    }));
+  }
+
+  return;
 
   if (req.url === "/api/status") {
     try {
