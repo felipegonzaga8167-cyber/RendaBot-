@@ -1,8 +1,8 @@
 
 {
   "name": "rendabot",
-  "version": "1.1.0",
-  "description": "RendaBot com geração automática de vídeos",
+  "version": "1.2.0",
+  "description": "RendaBot com geracao automatica de videos e narracao",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,6 +11,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.2.0"
+    "ffmpeg-static": "^5.2.0",
+    "node-edge-tts": "^1.2.0"
   }
 }
