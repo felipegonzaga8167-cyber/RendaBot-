@@ -1,8 +1,8 @@
 
 {
   "name": "rendabot",
-  "version": "2.1.0",
-  "description": "RendaBot com videos narrados gratuitamente",
+  "version": "3.0.0",
+  "description": "RendaBot - videos com texto e narracao",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,7 +11,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.2.0",
-    "text2wav": "0.0.14"
+    "ffmpeg-static": "^5.2.0"
   }
 }
