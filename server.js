@@ -5,17 +5,22 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const ffmpeg = require('ffmpeg-static');
+const { EdgeTTS } = require('node-edge-tts');
 
 const PORT = Number(process.env.PORT) || 10000;
 
-const produtos = [
-  {
-    id: 4814942,
-    nome: 'Onde está na Bíblia - Versículos bíblicos contra as heresias modernas',
-    plataforma: 'Hotmart',
-    linkAfiliado: 'https://go.hotmart.com/F107572734G',
-    ativo: true
-  }
+const produtos = [{
+  id: 4814942,
+  nome: 'Onde está na Bíblia - Versículos bíblicos contra as heresias modernas',
+  plataforma: 'Hotmart',
+  linkAfiliado: 'https://go.hotmart.com/F107572734G',
+  ativo: true
+}];
+
+const cenas = [
+  'Você gosta de estudar a Bíblia?',
+  'Conheça um material sobre versículos bíblicos',
+  'Confira os detalhes no link da descrição'
 ];
 
 function sendJSON(res, status, payload) {
@@ -23,17 +28,18 @@ function sendJSON(res, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
   });
-
   res.end(JSON.stringify(payload));
 }
 
 async function getHotmartToken() {
-  const clientId = process.env.HOTMART_CLIENT_ID;
-  const clientSecret = process.env.HOTMART_CLIENT_SECRET;
-  const basic = process.env.HOTMART_BASIC;
+  const {
+    HOTMART_CLIENT_ID: clientId,
+    HOTMART_CLIENT_SECRET: clientSecret,
+    HOTMART_BASIC: basic
+  } = process.env;
 
   if (!clientId || !clientSecret || !basic) {
-    throw new Error('Credenciais da Hotmart não configuradas');
+    throw new Error('Credenciais Hotmart não configuradas');
   }
 
   const params = new URLSearchParams({
@@ -43,7 +49,7 @@ async function getHotmartToken() {
   });
 
   const response = await fetch(
-    `https://api-sec-vlc.hotmart.com/security/oauth/token?${params.toString()}`,
+    `https://api-sec-vlc.hotmart.com/security/oauth/token?${params}`,
     {
       method: 'POST',
       headers: {
@@ -54,15 +60,13 @@ async function getHotmartToken() {
   );
 
   if (!response.ok) {
-    throw new Error(
-      `Falha na autenticação Hotmart: HTTP ${response.status}`
-    );
+    throw new Error(`Hotmart HTTP ${response.status}`);
   }
 
   const data = await response.json();
 
   if (!data.access_token) {
-    throw new Error('Hotmart não retornou token');
+    throw new Error('Token não retornado');
   }
 
   return data.access_token;
@@ -75,14 +79,14 @@ function gerarConteudos(produto) {
     aviso: 'Publicidade com link de afiliado',
     legenda:
       `Conheça o material "${produto.nome}". ` +
-      `Confira os detalhes: ${produto.linkAfiliado} ` +
+      `Confira: ${produto.linkAfiliado} ` +
       '#Publicidade #LinkDeAfiliado',
     roteiroVideo: {
       formato: 'Vertical, sem mostrar o rosto',
       duracao: '15 segundos',
-      cena1: 'Você gosta de estudar a Bíblia?',
-      cena2: 'Conheça um material sobre versículos bíblicos',
-      cena3: 'Confira os detalhes no link da descrição'
+      cena1: cenas[0],
+      cena2: cenas[1],
+      cena3: cenas[2]
     }
   };
 }
@@ -106,118 +110,167 @@ function criarImagemPPM(destino, largura, altura, cor) {
   );
 }
 
-function gerarVideo() {
+function executarFFmpeg(args) {
   return new Promise((resolve, reject) => {
-    const pasta = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'rendabot-')
-    );
+    const processo = spawn(ffmpeg, args);
+    let erro = '';
 
-    const arquivo = path.join(pasta, 'video.mp4');
+    processo.stderr.on('data', dados => {
+      erro = (erro + dados.toString()).slice(-3000);
+    });
 
-    const limpar = () => {
-      fs.rmSync(pasta, {
-        recursive: true,
-        force: true
-      });
-    };
+    processo.on('error', reject);
 
-    try {
-      const cores = [
-        [20, 33, 61],
-        [29, 53, 87],
-        [43, 70, 105]
-      ];
-
-      const arquivos = cores.map((cor, indice) => {
-        const nome = path.join(
-          pasta,
-          `cena${indice + 1}.ppm`
+    processo.on('close', codigo => {
+      if (codigo === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `FFmpeg (${codigo}): ${erro.slice(-500)}`
+          )
         );
-
-        criarImagemPPM(nome, 720, 1280, cor);
-
-        return nome;
-      });
-
-      const lista = path.join(pasta, 'cenas.txt');
-
-      fs.writeFileSync(
-        lista,
-        [
-          `file '${arquivos[0]}'`,
-          'duration 5',
-          `file '${arquivos[1]}'`,
-          'duration 5',
-          `file '${arquivos[2]}'`,
-          'duration 5',
-          `file '${arquivos[2]}'`
-        ].join('\n')
-      );
-
-      const args = [
-        '-y',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', lista,
-        '-vf', 'fps=24,format=yuv420p',
-        '-t', '15',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-movflags', '+faststart',
-        arquivo
-      ];
-
-      const processo = spawn(ffmpeg, args);
-
-      let stderr = '';
-      let finalizado = false;
-
-      const falhar = (error) => {
-        if (finalizado) return;
-
-        finalizado = true;
-        limpar();
-        reject(error);
-      };
-
-      processo.stderr.on('data', chunk => {
-        stderr = (
-          stderr + chunk.toString()
-        ).slice(-4000);
-      });
-
-      processo.on('error', falhar);
-
-      processo.on('close', codigo => {
-        if (finalizado) return;
-
-        if (codigo !== 0 || !fs.existsSync(arquivo)) {
-          return falhar(
-            new Error(
-              `FFmpeg falhou (${codigo}): ${stderr.slice(-600)}`
-            )
-          );
-        }
-
-        finalizado = true;
-
-        resolve({
-          pasta,
-          arquivo
-        });
-      });
-    } catch (error) {
-      limpar();
-      reject(error);
-    }
+      }
+    });
   });
 }
 
+function textoParaFiltro(texto) {
+  return texto
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/,/g, '\\,')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
+async function gerarVideo(voz) {
+  const pasta = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'rendabot-')
+  );
+
+  const arquivo = path.join(pasta, 'video.mp4');
+
+  try {
+    const audio = path.join(pasta, 'narracao.mp3');
+
+    const tts = new EdgeTTS({
+      voice: voz === 'masculina'
+        ? 'pt-BR-AntonioNeural'
+        : 'pt-BR-FranciscaNeural'
+    });
+
+    await tts.ttsPromise(
+      cenas.join('. '),
+      audio
+    );
+
+    if (
+      !fs.existsSync(audio) ||
+      fs.statSync(audio).size === 0
+    ) {
+      throw new Error('Narração não gerou áudio');
+    }
+
+    const fontes = [
+      '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+      '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf'
+    ];
+
+    const fonte = fontes.find(fs.existsSync);
+
+    if (!fonte) {
+      throw new Error(
+        'Fonte para textos não encontrada no servidor'
+      );
+    }
+
+    const cores = [
+      [20, 33, 61],
+      [29, 53, 87],
+      [43, 70, 105]
+    ];
+
+    const arquivos = cores.map((cor, i) => {
+      const destino = path.join(
+        pasta,
+        `cena${i + 1}.ppm`
+      );
+
+      criarImagemPPM(
+        destino,
+        720,
+        1280,
+        cor
+      );
+
+      return destino;
+    });
+
+    const lista = path.join(pasta, 'cenas.txt');
+
+    fs.writeFileSync(
+      lista,
+      [
+        `file '${arquivos[0]}'`,
+        'duration 5',
+        `file '${arquivos[1]}'`,
+        'duration 5',
+        `file '${arquivos[2]}'`,
+        'duration 5',
+        `file '${arquivos[2]}'`
+      ].join('\n')
+    );
+
+    const filtros = cenas.map((texto, i) =>
+      `drawtext=fontfile=${fonte}:` +
+      `text='${textoParaFiltro(texto)}':` +
+      'fontcolor=white:' +
+      'fontsize=32:' +
+      'box=1:' +
+      'boxcolor=black@0.55:' +
+      'boxborderw=16:' +
+      'x=(w-text_w)/2:' +
+      'y=(h-text_h)/2:' +
+      `enable='between(t,${i * 5},${(i + 1) * 5})'`
+    ).join(',');
+
+    await executarFFmpeg([
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', lista,
+      '-i', audio,
+      '-vf', `fps=24,${filtros},format=yuv420p`,
+      '-t', '15',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      arquivo
+    ]);
+
+    return { pasta, arquivo };
+
+  } catch (erro) {
+    fs.rmSync(pasta, {
+      recursive: true,
+      force: true
+    });
+
+    throw erro;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
-  const rota = new URL(
+  const url = new URL(
     req.url,
     'http://localhost'
-  ).pathname;
+  );
+
+  const rota = url.pathname;
 
   if (req.method !== 'GET') {
     return sendJSON(res, 405, {
@@ -230,7 +283,8 @@ const server = http.createServer(async (req, res) => {
       status: 'online',
       app: 'RendaBot',
       produtosCadastrados: produtos.length,
-      gerarVideo: 'disponível'
+      gerarVideo: 'disponível',
+      vozes: ['feminina', 'masculina']
     });
   }
 
@@ -243,11 +297,11 @@ const server = http.createServer(async (req, res) => {
         hotmart: 'conectada',
         token: 'gerado'
       });
-    } catch (error) {
+
+    } catch (erro) {
       return sendJSON(res, 502, {
         status: 'erro',
-        hotmart: 'erro',
-        mensagem: error.message
+        mensagem: erro.message
       });
     }
   }
@@ -256,7 +310,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const token = await getHotmartToken();
 
-      const response = await fetch(
+      const resposta = await fetch(
         'https://developers.hotmart.com/products/api/v1/products?max_results=50',
         {
           headers: {
@@ -266,17 +320,16 @@ const server = http.createServer(async (req, res) => {
         }
       );
 
-      const data = await response.json();
-
       return sendJSON(
         res,
-        response.status,
-        data
+        resposta.status,
+        await resposta.json()
       );
-    } catch (error) {
+
+    } catch (erro) {
       return sendJSON(res, 502, {
         status: 'erro',
-        mensagem: error.message
+        mensagem: erro.message
       });
     }
   }
@@ -290,7 +343,7 @@ const server = http.createServer(async (req, res) => {
 
   if (rota === '/api/conteudos') {
     const ativos = produtos.filter(
-      produto => produto.ativo
+      p => p.ativo
     );
 
     return sendJSON(res, 200, {
@@ -300,10 +353,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (rota === '/api/video') {
-    let resultado;
+    const voz =
+      url.searchParams.get('voz') || 'feminina';
+
+    if (!['feminina', 'masculina'].includes(voz)) {
+      return sendJSON(res, 400, {
+        erro: 'Use voz=feminina ou voz=masculina'
+      });
+    }
 
     try {
-      resultado = await gerarVideo();
+      const resultado = await gerarVideo(voz);
 
       const tamanho = fs.statSync(
         resultado.arquivo
@@ -312,7 +372,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         'Content-Type': 'video/mp4',
         'Content-Disposition':
-          'attachment; filename="rendabot-video.mp4"',
+          `attachment; filename="rendabot-${voz}.mp4"`,
         'Content-Length': tamanho,
         'Cache-Control': 'no-store'
       });
@@ -337,18 +397,12 @@ const server = http.createServer(async (req, res) => {
       res.on('close', limpar);
 
       return stream.pipe(res);
-    } catch (error) {
-      if (resultado) {
-        fs.rmSync(resultado.pasta, {
-          recursive: true,
-          force: true
-        });
-      }
 
+    } catch (erro) {
       return sendJSON(res, 500, {
         status: 'erro',
-        mensagem: 'Não foi possível gerar o vídeo',
-        detalhes: error.message
+        mensagem: 'Não foi possível gerar vídeo narrado',
+        detalhes: erro.message
       });
     }
   }
@@ -359,7 +413,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(
-    `RendaBot online na porta ${PORT}`
-  );
+  console.log(`RendaBot online na porta ${PORT}`);
 });
