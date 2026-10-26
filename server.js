@@ -22,14 +22,16 @@ const cenas = [
 ];
 
 const DURACAO_CENA = 7;
-const DURACAO_VIDEO = DURACAO_CENA * cenas.length;
+const DURACAO_VIDEO = 21;
 
-function enviarJSON(res, status, dados) {
+function enviarJSON(res, codigo, dados) {
   if (res.headersSent) return;
-  res.writeHead(status, {
+
+  res.writeHead(codigo, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
   });
+
   res.end(JSON.stringify(dados));
 }
 
@@ -50,7 +52,7 @@ async function tokenHotmart() {
 
   const resposta = await fetch(
     'https://api-sec-vlc.hotmart.com/security/oauth/token?' +
-      parametros.toString(),
+    parametros.toString(),
     {
       method: 'POST',
       headers: {
@@ -68,7 +70,7 @@ async function tokenHotmart() {
   const dados = await resposta.json();
 
   if (!dados.access_token) {
-    throw new Error('Token não recebido');
+    throw new Error('Token Hotmart não recebido');
   }
 
   return dados.access_token;
@@ -85,7 +87,7 @@ function gerarConteudos(produto) {
       '#Publicidade #LinkDeAfiliado',
     roteiroVideo: {
       formato: 'Vertical, sem mostrar o rosto',
-      duracao: `${DURACAO_VIDEO} segundos`,
+      duracao: '21 segundos',
       cena1: cenas[0],
       cena2: cenas[1],
       cena3: cenas[2]
@@ -93,8 +95,9 @@ function gerarConteudos(produto) {
   };
 }
 
-// Fonte simples para colocar textos nas imagens.
-const fonte = {
+// Fonte desenhada nos pixels.
+// Não depende do filtro drawtext.
+const FONTE = {
   A: ['01110','10001','10001','11111','10001','10001','10001'],
   B: ['11110','10001','10001','11110','10001','10001','11110'],
   C: ['01111','10000','10000','10000','10000','10000','01111'],
@@ -122,6 +125,7 @@ const fonte = {
   Y: ['10001','10001','01010','00100','00100','00100','00100'],
   Z: ['11111','00001','00010','00100','01000','10000','11111'],
   '?': ['01110','10001','00001','00010','00100','00000','00100'],
+  '!': ['00100','00100','00100','00100','00100','00000','00100'],
   '.': ['00000','00000','00000','00000','00000','00100','00100'],
   ',': ['00000','00000','00000','00000','00100','00100','01000'],
   ' ': ['00000','00000','00000','00000','00000','00000','00000']
@@ -132,7 +136,7 @@ function normalizar(texto) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase()
-    .replace(/[^A-Z ?.,]/g, ' ');
+    .replace(/[^A-Z ?!.,]/g, ' ');
 }
 
 function dividirTexto(texto, limite = 22) {
@@ -143,26 +147,28 @@ function dividirTexto(texto, limite = 22) {
   for (const palavra of palavras) {
     if (!palavra) continue;
 
-    const teste = atual
+    const tentativa = atual
       ? atual + ' ' + palavra
       : palavra;
 
-    if (teste.length > limite && atual) {
+    if (tentativa.length > limite && atual) {
       linhas.push(atual);
       atual = palavra;
     } else {
-      atual = teste;
+      atual = tentativa;
     }
   }
 
   if (atual) linhas.push(atual);
+
   return linhas;
 }
 
-function criarImagem(arquivo, cor, texto) {
+function criarImagem(destino, cor, texto) {
   const largura = 720;
   const altura = 1280;
   const escala = 6;
+
   const pixels = Buffer.alloc(largura * altura * 3);
 
   for (let i = 0; i < pixels.length; i += 3) {
@@ -180,6 +186,7 @@ function criarImagem(arquivo, cor, texto) {
     for (let py = y1; py < y2; py++) {
       for (let px = x1; px < x2; px++) {
         const pos = (py * largura + px) * 3;
+
         pixels[pos] = rgb[0];
         pixels[pos + 1] = rgb[1];
         pixels[pos + 2] = rgb[2];
@@ -187,8 +194,8 @@ function criarImagem(arquivo, cor, texto) {
     }
   }
 
-  function letra(caractere, x, y) {
-    const desenho = fonte[caractere] || fonte[' '];
+  function desenharLetra(caractere, x, y) {
+    const desenho = FONTE[caractere] || FONTE[' '];
 
     for (let linha = 0; linha < 7; linha++) {
       for (let coluna = 0; coluna < 5; coluna++) {
@@ -207,8 +214,10 @@ function criarImagem(arquivo, cor, texto) {
 
   const linhas = dividirTexto(texto);
   const passo = 64;
-  const yInicial =
-    Math.floor(altura / 2 - linhas.length * passo / 2);
+
+  const yInicial = Math.floor(
+    altura / 2 - linhas.length * passo / 2
+  );
 
   retangulo(
     25,
@@ -219,11 +228,12 @@ function criarImagem(arquivo, cor, texto) {
   );
 
   linhas.forEach((linha, indice) => {
-    const xInicial =
-      Math.floor((largura - linha.length * 36) / 2);
+    const xInicial = Math.floor(
+      (largura - linha.length * 36) / 2
+    );
 
     for (let i = 0; i < linha.length; i++) {
-      letra(
+      desenharLetra(
         linha[i],
         xInicial + i * 36,
         yInicial + indice * passo
@@ -238,7 +248,7 @@ function criarImagem(arquivo, cor, texto) {
   );
 
   fs.writeFileSync(
-    arquivo,
+    destino,
     Buffer.concat([cabecalho, pixels])
   );
 }
@@ -248,22 +258,25 @@ function executarFFmpeg(argumentos) {
     const ffmpeg = require('ffmpeg-static');
 
     if (!ffmpeg) {
-      return reject(new Error('FFmpeg não encontrado'));
+      return reject(
+        new Error('FFmpeg não encontrado')
+      );
     }
 
     const processo = spawn(ffmpeg, argumentos);
     let log = '';
-    let encerrado = false;
+    let terminou = false;
 
     function finalizar(erro) {
-      if (encerrado) return;
-      encerrado = true;
+      if (terminou) return;
+      terminou = true;
+
       if (erro) reject(erro);
       else resolve();
     }
 
     processo.stderr.on('data', dados => {
-      log = (log + dados.toString()).slice(-3000);
+      log = (log + dados.toString()).slice(-5000);
     });
 
     processo.on('error', finalizar);
@@ -274,7 +287,7 @@ function executarFFmpeg(argumentos) {
       } else {
         finalizar(
           new Error(
-            'FFmpeg: ' + log.slice(-1000)
+            'FFmpeg falhou: ' + log.slice(-1500)
           )
         );
       }
@@ -282,33 +295,82 @@ function executarFFmpeg(argumentos) {
   });
 }
 
-async function criarNarracao(pasta, voz) {
-  // Geração local, sem WebSocket e sem API paga.
-  const text2wav = require('text2wav');
+// Narração gratuita por HTTP.
+// Serviço não oficial, sujeito a bloqueios.
+async function criarNarracao(pasta) {
+  const texto = cenas.join(' ');
 
-  const arquivo = path.join(pasta, 'narracao.wav');
+  const parametros = new URLSearchParams({
+    ie: 'UTF-8',
+    client: 'tw-ob',
+    tl: 'pt-BR',
+    q: texto
+  });
 
-  const variante =
-    voz === 'masculina'
-      ? 'pt-br+m3'
-      : 'pt-br+f3';
+  const url =
+    'https://translate.google.com/translate_tts?' +
+    parametros.toString();
 
-  console.log('Gerando áudio local:', variante);
+  console.log('Solicitando narração gratuita');
 
-  const audio = await text2wav(
-    cenas.join('. '),
-    {
-      voice: variante,
-      speed: 145,
-      amplitude: 100
-    }
-  );
+  const resposta = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: 'audio/mpeg,*/*'
+    },
+    signal: AbortSignal.timeout(30000)
+  });
 
-  if (!audio || audio.length < 100) {
-    throw new Error('Narração local não gerou áudio');
+  if (!resposta.ok) {
+    throw new Error(
+      'Serviço de voz respondeu HTTP ' +
+      resposta.status
+    );
   }
 
-  fs.writeFileSync(arquivo, Buffer.from(audio));
+  const tipo = resposta.headers.get('content-type') || '';
+
+  if (
+    tipo.includes('text/html') ||
+    tipo.includes('application/json')
+  ) {
+    throw new Error(
+      'Serviço de voz retornou texto em vez de áudio'
+    );
+  }
+
+  const buffer = Buffer.from(
+    await resposta.arrayBuffer()
+  );
+
+  if (buffer.length < 1000) {
+    throw new Error(
+      'Áudio não recebido ou arquivo muito pequeno'
+    );
+  }
+
+  const cabecalhoMP3 =
+    buffer.toString('ascii', 0, 3) === 'ID3';
+
+  const quadroMP3 =
+    buffer[0] === 0xff &&
+    (buffer[1] & 0xe0) === 0xe0;
+
+  if (!cabecalhoMP3 && !quadroMP3) {
+    throw new Error(
+      'Resposta não parece ser um MP3 válido'
+    );
+  }
+
+  const arquivo = path.join(pasta, 'narracao.mp3');
+
+  fs.writeFileSync(arquivo, buffer);
+
+  console.log(
+    'Narração recebida:',
+    buffer.length,
+    'bytes'
+  );
 
   return arquivo;
 }
@@ -319,7 +381,7 @@ async function gerarVideo(voz) {
   );
 
   try {
-    const audio = await criarNarracao(pasta, voz);
+    const audio = await criarNarracao(pasta);
 
     const cores = [
       [20, 33, 61],
@@ -330,13 +392,14 @@ async function gerarVideo(voz) {
     const imagens = [];
 
     for (let i = 0; i < cenas.length; i++) {
-      const arquivo = path.join(
+      const imagem = path.join(
         pasta,
         `cena${i + 1}.ppm`
       );
 
-      criarImagem(arquivo, cores[i], cenas[i]);
-      imagens.push(arquivo);
+      criarImagem(imagem, cores[i], cenas[i]);
+
+      imagens.push(imagem);
     }
 
     const lista = path.join(pasta, 'lista.txt');
@@ -353,7 +416,18 @@ async function gerarVideo(voz) {
 
     fs.writeFileSync(lista, linhas.join('\n'));
 
-    const video = path.join(pasta, 'video.mp4');
+    const arquivo = path.join(pasta, 'video.mp4');
+
+    // A voz base é a mesma.
+    // O filtro modifica a altura da voz.
+    const frequencia =
+      voz === 'masculina' ? 38000 : 47000;
+
+    const filtroAudio =
+      `aresample=44100,` +
+      `asetrate=${frequencia},` +
+      'aresample=44100,' +
+      'apad';
 
     await executarFFmpeg([
       '-y',
@@ -361,7 +435,10 @@ async function gerarVideo(voz) {
       '-safe', '0',
       '-i', lista,
       '-i', audio,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
       '-vf', 'fps=24,format=yuv420p',
+      '-af', filtroAudio,
       '-t', String(DURACAO_VIDEO),
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
@@ -369,23 +446,26 @@ async function gerarVideo(voz) {
       '-c:a', 'aac',
       '-b:a', '128k',
       '-movflags', '+faststart',
-      video
+      arquivo
     ]);
 
     if (
-      !fs.existsSync(video) ||
-      fs.statSync(video).size === 0
+      !fs.existsSync(arquivo) ||
+      fs.statSync(arquivo).size < 1000
     ) {
-      throw new Error('Vídeo não foi criado');
+      throw new Error('Vídeo MP4 não foi criado');
     }
 
-    return { pasta, video };
+    console.log('Vídeo criado:', voz);
+
+    return { pasta, arquivo };
 
   } catch (erro) {
     fs.rmSync(pasta, {
       recursive: true,
       force: true
     });
+
     throw erro;
   }
 }
@@ -405,7 +485,7 @@ const server = http.createServer(async (req, res) => {
       return enviarJSON(res, 200, {
         status: 'online',
         app: 'RendaBot',
-        narracao: 'local gratuita',
+        narracao: 'gratuita experimental',
         vozes: ['feminina', 'masculina']
       });
     }
@@ -419,6 +499,7 @@ const server = http.createServer(async (req, res) => {
           hotmart: 'conectada',
           token: 'gerado'
         });
+
       } catch (erro) {
         return enviarJSON(res, 502, {
           status: 'online',
@@ -436,11 +517,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (rota === '/api/conteudos') {
+      const ativos = produtos.filter(p => p.ativo);
+
       return enviarJSON(res, 200, {
-        total: produtos.length,
-        conteudos: produtos
-          .filter(p => p.ativo)
-          .map(gerarConteudos)
+        total: ativos.length,
+        conteudos: ativos.map(gerarConteudos)
       });
     }
 
@@ -478,7 +559,7 @@ const server = http.createServer(async (req, res) => {
 
       } catch (erro) {
         return enviarJSON(res, 502, {
-          erro: 'Falha ao consultar Hotmart',
+          erro: 'Falha na consulta Hotmart',
           mensagem: erro.message
         });
       }
@@ -490,7 +571,7 @@ const server = http.createServer(async (req, res) => {
 
       if (!['feminina', 'masculina'].includes(voz)) {
         return enviarJSON(res, 400, {
-          erro: 'Use feminina ou masculina'
+          erro: 'Use voz=feminina ou voz=masculina'
         });
       }
 
@@ -498,7 +579,10 @@ const server = http.createServer(async (req, res) => {
         console.log('Gerando vídeo:', voz);
 
         const resultado = await gerarVideo(voz);
-        const tamanho = fs.statSync(resultado.video).size;
+
+        const tamanho = fs.statSync(
+          resultado.arquivo
+        ).size;
 
         res.writeHead(200, {
           'Content-Type': 'video/mp4',
@@ -521,11 +605,15 @@ const server = http.createServer(async (req, res) => {
         }
 
         const stream = fs.createReadStream(
-          resultado.video
+          resultado.arquivo
         );
 
         stream.on('error', erro => {
-          console.error('Erro no download:', erro.message);
+          console.error(
+            'Erro no download:',
+            erro.message
+          );
+
           res.destroy();
           limpar();
         });
@@ -542,7 +630,7 @@ const server = http.createServer(async (req, res) => {
 
         return enviarJSON(res, 500, {
           status: 'erro',
-          mensagem: 'Falha ao gerar vídeo',
+          mensagem: 'Não foi possível gerar o vídeo',
           detalhes: erro.message
         });
       }
@@ -562,9 +650,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on('error', erro => {
-  console.error('Erro ao iniciar:', erro.message);
+  console.error(
+    'Erro ao iniciar servidor:',
+    erro.message
+  );
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('RendaBot online na porta ' + PORT);
+  console.log(
+    'RendaBot online na porta ' + PORT
+  );
 });
