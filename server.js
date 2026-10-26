@@ -1,3 +1,4 @@
+
 const http = require("http");
 
 const PORT = process.env.PORT || 10000;
@@ -8,111 +9,119 @@ async function getHotmartToken() {
   const basic = process.env.HOTMART_BASIC;
 
   if (!clientId || !clientSecret || !basic) {
-    throw new Error("Credenciais Hotmart não configuradas no Render");
+    throw new Error("Credenciais da Hotmart não configuradas");
   }
 
-  const url =
-    "https://api-sec-vlc.hotmart.com/security/oauth/token" +
-    "?grant_type=client_credentials" +
-    `&client_id=${encodeURIComponent(clientId)}` +
-    `&client_secret=${encodeURIComponent(clientSecret)}`;
-
-  const authorization = basic.startsWith("Basic ")
-    ? basic
-    : `Basic ${basic}`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": authorization,
-      "Content-Type": "application/json"
-    }
+  const params = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: clientSecret
   });
+
+  const response = await fetch(
+    "https://api-sec-vlc.hotmart.com/security/oauth/token?" +
+      params.toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basic}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
+    }
+  );
 
   const data = await response.json();
 
   if (!response.ok) {
     throw new Error(
-      `Erro Hotmart ${response.status}: ${JSON.stringify(data)}`
+      `Erro de autenticação Hotmart: ${response.status}`
     );
+  }
+
+  if (!data.access_token) {
+    throw new Error("Hotmart não retornou um token");
   }
 
   return data.access_token;
 }
 
-const server = http.createServer(async (req, res) => {
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+function sendJSON(res, statusCode, data) {
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8"
+  });
 
-  if (req.url === "/") {
-    res.end(JSON.stringify({
+  res.end(JSON.stringify(data));
+}
+
+const server = http.createServer(async (req, res) => {
+  const path = new URL(
+    req.url,
+    "http://localhost"
+  ).pathname;
+
+  if (path === "/") {
+    return sendJSON(res, 200, {
       status: "online",
       app: "RendaBot",
       message: "Servidor funcionando"
-    }));
-    return;
+    });
   }
-if (req.url === "/api/products") {
-  try {
-    const token = await getHotmartToken();
 
-    const response = await fetch(
-      "https://developers.hotmart.com/products/api/v1/products?max_results=50",
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+  if (path === "/api/status") {
+    try {
+      await getHotmartToken();
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(
-        `Erro Hotmart ${response.status}: ${JSON.stringify(data)}`
-      );
+      return sendJSON(res, 200, {
+        status: "online",
+        hotmart: "conectada",
+        token: "gerado"
+      });
+    } catch (error) {
+      return sendJSON(res, 500, {
+        status: "erro",
+        hotmart: "erro",
+        mensagem: error.message
+      });
     }
-
-    res.end(JSON.stringify(data));
-  } catch (error) {
-    res.statusCode = 500;
-
-    res.end(JSON.stringify({
-      status: "erro",
-      mensagem: error.message
-    }));
   }
 
-  return;
-
-  if (req.url === "/api/status") {
+  if (path === "/api/products") {
     try {
       const token = await getHotmartToken();
 
-      res.end(JSON.stringify({
-        status: "online",
-        hotmart: "conectada",
-        token: token ? "gerado" : "não gerado"
-      }));
+      const response = await fetch(
+        "https://developers.hotmart.com/products/api/v1/products?max_results=50",
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json"
+          }
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        return sendJSON(res, response.status, {
+          status: "erro",
+          mensagem: "Falha ao consultar produtos da Hotmart",
+          detalhes: data
+        });
+      }
+
+      return sendJSON(res, 200, data);
     } catch (error) {
-      res.statusCode = 500;
-
-      res.end(JSON.stringify({
-        status: "online",
-        hotmart: "erro",
+      return sendJSON(res, 500, {
+        status: "erro",
         mensagem: error.message
-      }));
+      });
     }
-
-    return;
   }
 
-  res.statusCode = 404;
-
-  res.end(JSON.stringify({
+  return sendJSON(res, 404, {
     error: "Rota não encontrada"
-  }));
+  });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
