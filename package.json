@@ -3,12 +3,12 @@
   "name": "rendabot",
   "version": "6.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js"
-  },
-  "engines": {
-    "node": ">=20"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
