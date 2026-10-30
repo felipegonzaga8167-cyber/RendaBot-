@@ -6,9 +6,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
+const sharp = require('sharp');
 const ffmpeg = require('ffmpeg-static');
 
-const PORT = Number(process.env.PORT || 10000);
+const PORT = Number(process.env.PORT) || 10000;
 const API_KEY = process.env.RENDABOT_API_KEY || '';
 
 const DEFAULT = {
@@ -16,78 +18,48 @@ const DEFAULT = {
   nome: 'Onde está na Bíblia - Versículos bíblicos contra as heresias modernas',
   assunto: 'Bíblia',
   linkAfiliado: 'https://go.hotmart.com/F107572734G',
-  ativo: true,
-  comissao: 0
+  ativo: true
 };
 
 let running = false;
 let lastJob = null;
 
-function respond(res, code, data) {
-  res.writeHead(code, {
+function reply(res, status, data) {
+  res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
   });
   res.end(JSON.stringify(data));
 }
 
-function safeError(e) {
-  return e instanceof Error ? e.message : String(e);
-}
-
 function products() {
-  let p = process.env.RENDABOT_PRODUCTS_JSON
+  const a = process.env.RENDABOT_PRODUCTS_JSON
     ? JSON.parse(process.env.RENDABOT_PRODUCTS_JSON)
     : [DEFAULT];
 
-  if (!Array.isArray(p)) {
-    throw Error('RENDABOT_PRODUCTS_JSON deve ser um array');
+  if (!Array.isArray(a)) {
+    throw Error('RENDABOT_PRODUCTS_JSON deve ser uma lista');
   }
 
-  return p.filter(x =>
-    x &&
-    x.ativo !== false &&
-    typeof x.nome === 'string' &&
-    x.nome.trim() &&
-    typeof x.linkAfiliado === 'string' &&
-    /^https:\/\//.test(x.linkAfiliado)
-  ).map(x => ({
-    ...x,
-    assunto: String(x.assunto || x.nome)
+  return a.filter(p =>
+    p &&
+    p.ativo !== false &&
+    typeof p.nome === 'string' &&
+    typeof p.linkAfiliado === 'string' &&
+    /^https:\/\//.test(p.linkAfiliado)
+  ).map(p => ({
+    ...p,
+    assunto: String(p.assunto || p.nome)
   }));
 }
 
-function selectProduct(id) {
-  const p = products();
-
+function choose(id) {
   return id
-    ? p.find(x => String(x.id) === String(id))
-    : p[0];
+    ? products().find(p => String(p.id) === String(id))
+    : products()[0];
 }
 
-function rank(p) {
-  const commission = Number(p.comissao || 0);
-  const demand = Number(p.demanda || 0);
-  const competition = Number(p.concorrencia || 0);
-
-  const score = Math.round(
-    Math.max(0, Math.min(
-      100,
-      commission * 0.3 +
-      demand * 0.5 +
-      (100 - competition) * 0.2
-    ))
-  );
-
-  return {
-    ...p,
-    pontuacao: score,
-    avaliacao:
-      'Estimativa com dados configurados; sem pesquisa de mercado em tempo real'
-  };
-}
-
-function script(p) {
+function scenes(p) {
   return [
     `Você quer aprender mais sobre ${p.assunto}?`,
     `Conheça ${p.nome}.`,
@@ -95,7 +67,11 @@ function script(p) {
   ];
 }
 
-async function fetchSafe(url, options = {}) {
+function caption(p) {
+  return `Conheça ${p.nome}: ${p.linkAfiliado} #Publicidade #LinkDeAfiliado`;
+}
+
+async function request(url, options = {}) {
   return fetch(url, {
     ...options,
     signal: AbortSignal.timeout(20000)
@@ -111,7 +87,7 @@ async function token() {
     throw Error('Credenciais Hotmart ausentes');
   }
 
-  const r = await fetchSafe(
+  const r = await request(
     'https://api-sec-vlc.hotmart.com/security/oauth/token',
     {
       method: 'POST',
@@ -143,7 +119,7 @@ async function token() {
 async function hotmartProducts() {
   const access = await token();
 
-  const r = await fetchSafe(
+  const r = await request(
     'https://developers.hotmart.com/products/api/v1/products?max_results=50',
     {
       headers: {
@@ -153,24 +129,19 @@ async function hotmartProducts() {
     }
   );
 
-  const body = await r.text();
+  const text = await r.text();
   let data;
 
   try {
-    data = JSON.parse(body);
+    data = JSON.parse(text);
   } catch {
-    data = {
-      mensagem: body.slice(0, 300)
-    };
+    data = { mensagem: text.slice(0, 300) };
   }
 
-  return {
-    status: r.status,
-    data
-  };
+  return { status: r.status, data };
 }
 
-function strip(s) {
+function clean(s) {
   return String(s || '')
     .replace(/<[^>]*>/g, '')
     .trim();
@@ -183,7 +154,7 @@ async function research(p) {
     noticias: [],
     fontes: [
       {
-        tipo: 'Link afiliado configurado',
+        tipo: 'Produto',
         url: p.linkAfiliado
       }
     ],
@@ -191,7 +162,7 @@ async function research(p) {
   };
 
   try {
-    const qs = new URLSearchParams({
+    const q = new URLSearchParams({
       action: 'query',
       generator: 'search',
       gsrsearch: 'filetype:bitmap ' + p.assunto,
@@ -203,12 +174,11 @@ async function research(p) {
       format: 'json'
     });
 
-    const r = await fetchSafe(
-      'https://commons.wikimedia.org/w/api.php?' + qs,
+    const r = await request(
+      'https://commons.wikimedia.org/w/api.php?' + q,
       {
         headers: {
-          'User-Agent':
-            'RendaBot/6.0 (educational affiliate video bot)'
+          'User-Agent': 'RendaBot/6.0 (video creator)'
         }
       }
     );
@@ -219,18 +189,16 @@ async function research(p) {
 
     const d = await r.json();
 
-    for (const page of Object.values(
-      d.query?.pages || {}
-    )) {
+    for (const page of Object.values(d.query?.pages || {})) {
       const i = page.imageinfo?.[0];
 
       if (!i) continue;
 
-      const lic = strip(
+      const license = clean(
         i.extmetadata?.LicenseShortName?.value
       );
 
-      if (!/^(CC0|Public domain|Domínio público|Público domínio)$/i.test(lic)) {
+      if (!/^(CC0|Public domain|Domínio público|Público domínio)$/i.test(license)) {
         continue;
       }
 
@@ -240,41 +208,35 @@ async function research(p) {
 
       const url = i.thumburl || i.url;
 
-      if (!url || !url.startsWith('https://')) {
+      if (
+        !url ||
+        !url.startsWith('https://upload.wikimedia.org/')
+      ) {
         continue;
       }
 
       result.imagens.push({
         titulo: page.title,
         url,
-        licenca: lic,
+        licenca: license,
         fonte: i.descriptionurl ||
           'https://commons.wikimedia.org/',
-        autor: strip(
+        autor: clean(
           i.extmetadata?.Artist?.value
         )
       });
 
-      if (result.imagens.length === 6) break;
+      if (result.imagens.length >= 6) break;
     }
 
   } catch (e) {
     result.avisos.push(
-      'Imagens: ' + safeError(e)
+      'Pesquisa de imagens: ' + e.message
     );
   }
 
-  result.fontes.push({
-    tipo: 'Pesquisa manual de notícias',
-    url: 'https://www.google.com/search?' +
-      new URLSearchParams({
-        q: p.assunto + ' notícias',
-        tbm: 'nws'
-      })
-  });
-
   result.avisos.push(
-    'Notícias não verificadas automaticamente. Confira direitos e relevância das imagens antes de publicar.'
+    'Notícias e demanda de mercado ainda não são verificadas automaticamente.'
   );
 
   return result;
@@ -282,77 +244,39 @@ async function research(p) {
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    const c = spawn(cmd, args);
-    let err = '';
+    const p = spawn(cmd, args);
+    let log = '';
 
-    c.stderr.on('data', b => {
-      err = (err + b).slice(-4000);
+    p.stderr.on('data', b => {
+      log = (log + b.toString()).slice(-5000);
     });
 
-    c.on('error', reject);
+    p.once('error', reject);
 
-    c.on('close', code => {
+    p.once('close', code => {
       if (code === 0) {
         resolve();
       } else {
         reject(
-          Error(
-            'FFmpeg ' + code + ': ' +
-            err.slice(-1200)
-          )
+          Error('FFmpeg: ' + log.slice(-1200))
         );
       }
     });
   });
 }
 
-async function downloadImage(url, file) {
-  const r = await fetchSafe(url);
-
-  if (!r.ok) {
-    throw Error('Imagem HTTP ' + r.status);
-  }
-
-  const mime =
-    r.headers.get('content-type') || '';
-
-  if (!/^image\/(jpeg|png)/.test(mime)) {
-    throw Error('Formato de imagem inválido');
-  }
-
-  const len = Number(
-    r.headers.get('content-length') || 0
-  );
-
-  if (len > 8000000) {
-    throw Error('Imagem grande demais');
-  }
-
-  const b = Buffer.from(
-    await r.arrayBuffer()
-  );
-
-  if (b.length < 1000 || b.length > 8000000) {
-    throw Error('Tamanho inválido');
-  }
-
-  fs.writeFileSync(file, b);
+function escapeXML(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
-function drawEscape(t) {
-  return String(t)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9 .,!?-]/g, ' ')
-    .replace(/\\/g, '')
-    .replace(/:/g, '\\:')
-    .replace(/'/g, "\\'")
-    .replace(/%/g, '\\%');
-}
-
-function wrapText(t, max = 26) {
-  const words = drawEscape(t).split(/\s+/);
-  let lines = [];
+function wrap(text, max = 23) {
+  const words = String(text).split(/\s+/);
+  const lines = [];
   let line = '';
 
   for (const w of words) {
@@ -369,14 +293,100 @@ function wrapText(t, max = 26) {
 
   if (line) lines.push(line);
 
-  return lines.slice(0, 6).join('\\n');
+  return lines.slice(0, 8);
 }
 
-async function synthesize(dir, lines, choice) {
+async function download(url) {
+  const r = await request(url);
+
+  if (!r.ok) {
+    throw Error('Imagem HTTP ' + r.status);
+  }
+
+  const len = Number(
+    r.headers.get('content-length') || 0
+  );
+
+  if (len > 8000000) {
+    throw Error('Imagem muito grande');
+  }
+
+  const mime =
+    r.headers.get('content-type') || '';
+
+  if (!/^image\/(jpeg|png)/.test(mime)) {
+    throw Error('Formato de imagem inválido');
+  }
+
+  const b = Buffer.from(await r.arrayBuffer());
+
+  if (b.length < 1000 || b.length > 8000000) {
+    throw Error('Tamanho de imagem inválido');
+  }
+
+  return b;
+}
+
+async function makeFrame(text, image, file, index) {
+  const colors = [
+    '#14213d',
+    '#1d3557',
+    '#2b4669'
+  ];
+
+  let base;
+
+  if (image) {
+    try {
+      base = sharp(image).resize(720, 1280, {
+        fit: 'cover'
+      });
+    } catch {
+      base = null;
+    }
+  }
+
+  if (!base) {
+    base = sharp({
+      create: {
+        width: 720,
+        height: 1280,
+        channels: 3,
+        background: colors[index % colors.length]
+      }
+    });
+  }
+
+  const lines = wrap(text);
+  const fontSize = lines.length > 5 ? 30 : 36;
+  const lineHeight = fontSize + 14;
+
+  const start =
+    640 - ((lines.length - 1) * lineHeight) / 2;
+
+  const spans = lines.map((line, i) =>
+    `<text x="360" y="${Math.round(start + i * lineHeight)}" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${escapeXML(line)}</text>`
+  ).join('');
+
+  const svg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1280">
+      <rect x="20" y="390" width="680" height="490" rx="24" fill="#07101f" fill-opacity="0.78"/>
+      ${spans}
+      <rect x="90" y="1090" width="540" height="7" rx="3" fill="#e9b85b"/>
+    </svg>`
+  );
+
+  await base
+    .composite([{ input: svg }])
+    .png()
+    .toFile(file);
+}
+
+async function synthesize(dir, lines, voice) {
   const { EdgeTTS } = require('node-edge-tts');
 
   const tts = new EdgeTTS({
-    voice: choice === 'masculina'
+    voice: voice === 'masculina'
       ? 'pt-BR-AntonioNeural'
       : 'pt-BR-FranciscaNeural',
     lang: 'pt-BR',
@@ -384,12 +394,12 @@ async function synthesize(dir, lines, choice) {
       'audio-24khz-48kbitrate-mono-mp3'
   });
 
-  const files = [];
+  const result = [];
 
   for (let i = 0; i < lines.length; i++) {
     const f = path.join(
       dir,
-      'voz' + i + '.mp3'
+      `audio${i}.mp3`
     );
 
     await tts.ttsPromise(lines[i], f);
@@ -398,122 +408,68 @@ async function synthesize(dir, lines, choice) {
       !fs.existsSync(f) ||
       fs.statSync(f).size < 500
     ) {
-      throw Error('Narração vazia');
+      throw Error('Áudio não gerado');
     }
 
-    files.push(f);
+    result.push(f);
   }
 
-  return files;
+  return result;
 }
 
-async function makeVideo(p, choice) {
+async function generate(p, voice) {
   const dir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'rendabot6-')
   );
 
   try {
-    const lines = script(p);
-    const found = await research(p);
-    const audios = await synthesize(
-      dir,
-      lines,
-      choice
-    );
-
+    const lines = scenes(p);
+    const researchResult = await research(p);
+    const audios = await synthesize(dir, lines, voice);
     const clips = [];
 
-    const font =
-      process.env.RENDABOT_FONT ||
-      '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
-
-    if (!fs.existsSync(font)) {
-      throw Error(
-        'Fonte ausente: configure RENDABOT_FONT ou instale DejaVuSans'
-      );
-    }
-
     for (let i = 0; i < lines.length; i++) {
-      let img = null;
-      const item = found.imagens[i];
+      let image = null;
+      const candidate = researchResult.imagens[i];
 
-      if (item) {
+      if (candidate) {
         try {
-          img = path.join(
-            dir,
-            'image' + i + '.jpg'
-          );
-
-          await downloadImage(item.url, img);
-
+          image = await download(candidate.url);
         } catch (e) {
           console.warn(
             'Imagem ignorada:',
-            safeError(e)
+            e.message
           );
-
-          img = null;
         }
       }
 
-      const inputs = img
-        ? [
-            '-loop', '1',
-            '-framerate', '24',
-            '-i', img
-          ]
-        : [
-            '-f', 'lavfi',
-            '-i',
-            `color=c=${
-              [
-                '0x14213d',
-                '0x1d3557',
-                '0x2b4669'
-              ][i]
-            }:s=720x1280:r=24`
-          ];
-
-      const textfile = path.join(
+      const frame = path.join(
         dir,
-        'texto' + i + '.txt'
+        `frame${i}.png`
       );
 
-      fs.writeFileSync(
-        textfile,
-        wrapText(lines[i]).replace(/\\n/g, '\n')
+      await makeFrame(
+        lines[i],
+        image,
+        frame,
+        i
       );
-
-      const filter =
-        'scale=720:1280:' +
-        'force_original_aspect_ratio=increase,' +
-        'crop=720:1280,' +
-        'setsar=1,' +
-        'format=yuv420p,' +
-        'drawbox=x=18:y=400:w=684:h=460:' +
-        'color=black@0.65:t=fill,' +
-        `drawtext=fontfile=${font}:` +
-        `textfile=${textfile}:` +
-        'fontcolor=white:' +
-        'fontsize=36:' +
-        'line_spacing=12:' +
-        'x=(w-text_w)/2:' +
-        'y=(h-text_h)/2';
 
       const clip = path.join(
         dir,
-        'scene' + i + '.mp4'
+        `scene${i}.mp4`
       );
 
       await run(ffmpeg, [
         '-y',
-        ...inputs,
+        '-loop', '1',
+        '-framerate', '24',
+        '-i', frame,
         '-i', audios[i],
-        '-vf', filter,
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-r', '24',
         '-pix_fmt', 'yuv420p',
+        '-r', '24',
         '-c:a', 'aac',
         '-ar', '44100',
         '-b:a', '128k',
@@ -524,13 +480,10 @@ async function makeVideo(p, choice) {
       clips.push(clip);
     }
 
-    const concat = path.join(
-      dir,
-      'list.txt'
-    );
+    const list = path.join(dir, 'clips.txt');
 
     fs.writeFileSync(
-      concat,
+      list,
       clips.map(c => `file '${c}'`).join('\n')
     );
 
@@ -543,7 +496,7 @@ async function makeVideo(p, choice) {
       '-y',
       '-f', 'concat',
       '-safe', '0',
-      '-i', concat,
+      '-i', list,
       '-c', 'copy',
       '-movflags', '+faststart',
       output
@@ -552,7 +505,7 @@ async function makeVideo(p, choice) {
     return {
       dir,
       output,
-      found
+      researchResult
     };
 
   } catch (e) {
@@ -568,289 +521,268 @@ async function makeVideo(p, choice) {
 function authorized(req, url) {
   if (!API_KEY) return false;
 
-  const header =
-    req.headers.authorization || '';
+  const value =
+    req.headers.authorization?.replace(/^Bearer /, '') ||
+    url.searchParams.get('key') ||
+    '';
 
-  return (
-    header === 'Bearer ' + API_KEY ||
-    url.searchParams.get('key') === API_KEY
-  );
+  const a = Buffer.from(value);
+  const b = Buffer.from(API_KEY);
+
+  return a.length === b.length &&
+    crypto.timingSafeEqual(a, b);
 }
 
-const server = http.createServer(
-  async (req, res) => {
-    try {
-      const url = new URL(
-        req.url,
-        'http://localhost'
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(
+      req.url,
+      'http://localhost'
+    );
+
+    const route = url.pathname;
+
+    if (req.method !== 'GET') {
+      return reply(res, 405, {
+        erro: 'Método não permitido'
+      });
+    }
+
+    if (
+      route === '/' ||
+      route === '/api/health'
+    ) {
+      return reply(res, 200, {
+        status: 'online',
+        app: 'RendaBot',
+        versao: '6.0.1',
+        processando: running
+      });
+    }
+
+    if (!authorized(req, url)) {
+      return reply(res, 401, {
+        erro:
+          'Chave inválida ou ausente. Use Authorization: Bearer <chave>.'
+      });
+    }
+
+    if (route === '/api/afiliados') {
+      return reply(res, 200, {
+        total: products().length,
+        produtos: products()
+      });
+    }
+
+    if (route === '/api/oportunidades') {
+      return reply(res, 200, {
+        origem:
+          'Produtos configurados, sem pesquisa automática de mercado',
+        produtos: products().map(p => ({
+          ...p,
+          pontuacao: null,
+          avaliacao:
+            'Dados insuficientes para avaliar oportunidade real'
+        }))
+      });
+    }
+
+    if (route === '/api/conteudos') {
+      return reply(res, 200, {
+        conteudos: products().map(p => ({
+          produto: p.nome,
+          link: p.linkAfiliado,
+          cenas: scenes(p),
+          legenda: caption(p)
+        }))
+      });
+    }
+
+    if (route === '/api/pesquisa') {
+      const p = choose(
+        url.searchParams.get('id')
       );
 
-      const route = url.pathname;
-
-      if (req.method !== 'GET') {
-        return respond(res, 405, {
-          erro: 'Método não permitido'
-        });
-      }
-
-      if (
-        route === '/' ||
-        route === '/api/health'
-      ) {
-        return respond(res, 200, {
-          status: 'online',
-          app: 'RendaBot',
-          versao: '6.0',
-          processando: running
-        });
-      }
-
-      if (!authorized(req, url)) {
-        return respond(res, 401, {
-          erro:
-            'Configure RENDABOT_API_KEY no Render e envie Authorization: Bearer <chave>. Para testes no navegador, use ?key=<chave>; não compartilhe essa URL.'
-        });
-      }
-
-      if (route === '/api/afiliados') {
-        return respond(res, 200, {
-          total: products().length,
-          produtos: products()
-        });
-      }
-
-      if (route === '/api/oportunidades') {
-        return respond(res, 200, {
-          origem:
-            'Produtos configurados; não é catálogo público',
-          produtos: products()
-            .map(rank)
-            .sort(
-              (a, b) =>
-                b.pontuacao - a.pontuacao
-            )
-        });
-      }
-
-      if (route === '/api/conteudos') {
-        return respond(res, 200, {
-          conteudos: products().map(p => ({
-            produto: p.nome,
-            link: p.linkAfiliado,
-            cenas: script(p),
-            legenda:
-              `Conheça ${p.nome}: ` +
-              `${p.linkAfiliado} ` +
-              '#Publicidade #LinkDeAfiliado'
-          }))
-        });
-      }
-
-      if (route === '/api/pesquisa') {
-        const p = selectProduct(
-          url.searchParams.get('id')
-        );
-
-        return p
-          ? respond(
-              res,
-              200,
-              await research(p)
-            )
-          : respond(res, 404, {
-              erro: 'Produto não encontrado'
-            });
-      }
-
-      if (route === '/api/status') {
-        try {
-          await token();
-
-          return respond(res, 200, {
-            status: 'online',
-            hotmart: 'token obtido'
-          });
-
-        } catch (e) {
-          return respond(res, 502, {
-            status: 'online',
-            hotmart: 'erro',
-            mensagem: safeError(e)
-          });
-        }
-      }
-
-      if (route === '/api/products') {
-        try {
-          const result =
-            await hotmartProducts();
-
-          return respond(
-            res,
-            result.status,
-            result.data
-          );
-
-        } catch (e) {
-          return respond(res, 502, {
-            erro: safeError(e)
-          });
-        }
-      }
-
-      if (route === '/api/automacao') {
-        return respond(res, 200, {
-          selecao:
-            'Somente produtos configurados',
-          afiliacaoAutomatica: false,
-          publicacaoAutomatica: false,
-          agendamento: false,
-          observacao:
-            'Sem permissões de plataformas, nenhuma afiliação ou publicação é executada'
-        });
-      }
-
-      if (route === '/api/jobs') {
-        return respond(res, 200, {
-          processando: running,
-          ultimo: lastJob
-        });
-      }
-
-      if (route === '/api/video') {
-        if (running) {
-          return respond(res, 429, {
-            erro:
-              'Vídeo já em processamento'
-          });
-        }
-
-        const p = selectProduct(
-          url.searchParams.get('id')
-        );
-
-        if (!p) {
-          return respond(res, 404, {
+      return p
+        ? reply(res, 200, await research(p))
+        : reply(res, 404, {
             erro: 'Produto não encontrado'
           });
-        }
+    }
 
-        const voice =
-          url.searchParams.get('voz') ||
-          'feminina';
+    if (route === '/api/status') {
+      try {
+        await token();
 
-        if (
-          !['feminina', 'masculina']
-            .includes(voice)
-        ) {
-          return respond(res, 400, {
-            erro: 'Voz inválida'
-          });
-        }
-
-        running = true;
-
-        lastJob = {
-          produto: p.nome,
-          inicio: new Date().toISOString(),
-          status: 'processando'
-        };
-
-        let job;
-
-        try {
-          job = await makeVideo(
-            p,
-            voice
-          );
-
-          const size =
-            fs.statSync(job.output).size;
-
-          lastJob = {
-            ...lastJob,
-            status: 'concluido',
-            fim: new Date().toISOString(),
-            bytes: size
-          };
-
-          res.writeHead(200, {
-            'Content-Type': 'video/mp4',
-            'Content-Length': size,
-            'Content-Disposition':
-              `attachment; filename="rendabot-${voice}.mp4"`
-          });
-
-          const stream =
-            fs.createReadStream(job.output);
-
-          let cleaned = false;
-
-          function cleanup() {
-            if (cleaned) return;
-
-            cleaned = true;
-
-            fs.rmSync(job.dir, {
-              recursive: true,
-              force: true
-            });
-
-            running = false;
-          }
-
-          res.on('close', cleanup);
-
-          stream.on('error', e => {
-            console.error(e);
-            res.destroy();
-            cleanup();
-          });
-
-          stream.pipe(res);
-          return;
-
-        } catch (e) {
-          running = false;
-
-          lastJob = {
-            ...lastJob,
-            status: 'erro',
-            fim: new Date().toISOString(),
-            erro: safeError(e)
-          };
-
-          return respond(res, 500, {
-            erro: 'Falha ao gerar vídeo',
-            detalhes: safeError(e)
-          });
-        }
-      }
-
-      return respond(res, 404, {
-        erro: 'Rota não encontrada'
-      });
-
-    } catch (e) {
-      console.error(e);
-
-      if (!res.headersSent) {
-        respond(res, 500, {
-          erro: safeError(e)
+        return reply(res, 200, {
+          status: 'online',
+          hotmart: 'token obtido'
         });
-      } else {
-        res.destroy();
+
+      } catch (e) {
+        return reply(res, 502, {
+          hotmart: 'erro',
+          mensagem: e.message
+        });
       }
     }
+
+    if (route === '/api/products') {
+      try {
+        const x = await hotmartProducts();
+
+        return reply(res, x.status, x.data);
+
+      } catch (e) {
+        return reply(res, 502, {
+          erro: e.message
+        });
+      }
+    }
+
+    if (route === '/api/automacao') {
+      return reply(res, 200, {
+        afiliacaoAutomatica: false,
+        publicacaoAutomatica: false,
+        agendamento: false,
+        observacao:
+          'Integrações ainda não implementadas'
+      });
+    }
+
+    if (route === '/api/jobs') {
+      return reply(res, 200, {
+        processando: running,
+        ultimo: lastJob
+      });
+    }
+
+    if (route === '/api/video') {
+      if (running) {
+        return reply(res, 429, {
+          erro: 'Vídeo já em processamento'
+        });
+      }
+
+      const p = choose(
+        url.searchParams.get('id')
+      );
+
+      if (!p) {
+        return reply(res, 404, {
+          erro: 'Produto não encontrado'
+        });
+      }
+
+      const voice =
+        url.searchParams.get('voz') ||
+        'feminina';
+
+      if (
+        !['feminina', 'masculina'].includes(voice)
+      ) {
+        return reply(res, 400, {
+          erro: 'Voz inválida'
+        });
+      }
+
+      running = true;
+
+      lastJob = {
+        produto: p.nome,
+        inicio: new Date().toISOString(),
+        status: 'processando'
+      };
+
+      try {
+        const job = await generate(p, voice);
+        const size = fs.statSync(job.output).size;
+
+        lastJob = {
+          ...lastJob,
+          status: 'concluido',
+          fim: new Date().toISOString(),
+          bytes: size
+        };
+
+        res.writeHead(200, {
+          'Content-Type': 'video/mp4',
+          'Content-Length': size,
+          'Content-Disposition':
+            `attachment; filename="rendabot-${voice}.mp4"`
+        });
+
+        const stream =
+          fs.createReadStream(job.output);
+
+        let cleaned = false;
+
+        const cleanup = () => {
+          if (cleaned) return;
+
+          cleaned = true;
+
+          fs.rmSync(job.dir, {
+            recursive: true,
+            force: true
+          });
+
+          running = false;
+        };
+
+        res.once('close', cleanup);
+
+        stream.once('error', e => {
+          console.error(e);
+          res.destroy();
+          cleanup();
+        });
+
+        stream.pipe(res);
+        return;
+
+      } catch (e) {
+        running = false;
+
+        lastJob = {
+          ...lastJob,
+          status: 'erro',
+          fim: new Date().toISOString(),
+          erro: e.message
+        };
+
+        console.error(e);
+
+        return reply(res, 500, {
+          erro: 'Falha ao gerar vídeo',
+          detalhes: e.message
+        });
+      }
+    }
+
+    return reply(res, 404, {
+      erro: 'Rota não encontrada'
+    });
+
+  } catch (e) {
+    console.error(e);
+
+    if (!res.headersSent) {
+      reply(res, 500, {
+        erro: e.message
+      });
+    } else {
+      res.destroy();
+    }
   }
-);
+});
 
 server.listen(
   PORT,
   '0.0.0.0',
   () => {
     console.log(
-      'RendaBot 6.0 online na porta',
+      'RendaBot 6.0.1 online na porta',
       PORT
     );
   }
